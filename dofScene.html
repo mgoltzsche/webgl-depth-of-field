@@ -1,0 +1,461 @@
+<?xml version="1.0" encoding="utf-8"?>
+<html>
+
+<head>
+	<title>Depth of Field (DOF)</title>
+	<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+	<script type="text/javascript" src="lib/jquery/js/jquery-1.7.2.min.js"></script>
+	<!--<script type="text/javascript" src="lib/jquery/js/jquery-ui-1.8.21.custom.min.js"></script>-->
+	<script type="text/javascript" src="lib/tdl/base.js"></script>
+	<script type="text/javascript" src="webGLSceneGraph.js"></script>
+	<script type="text/javascript" src="postprocessor.js"></script>
+	<script type="text/javascript" src="scene3DControls.js"></script>
+	<script type="text/javascript" src="dofScene.js"></script>
+	<style type="text/css">
+		body {
+			margin:0;
+			font-size:0.9em;
+			background:#dddddd;
+		}
+		#header h2 {
+			margin:0;
+		}
+		#canvas {
+			position:absolute;
+			top:7%;
+			width:70%;
+			height:93%;
+		}
+		#controls {
+			width:28%;
+			float:right;
+		}
+		.control {
+			margin-bottom:20px;
+		}
+		#info {
+			display:none;
+			position:absolute;
+			background:#ffffff;
+			padding:5px;
+			margin:10px;
+			border-radius:5px;
+		}
+		#about {
+			position:fixed;
+			right:10px;
+			bottom:7px;
+			text-align:right;
+			font-style:italic;
+		}
+		.navi a:link, .navi a:visited, .navi a:hover, .navi a:active {
+			text-decoration: none;
+			color:#44aaee;
+		}
+		.navi, .navi li {
+			list-style-type:none;
+		}
+	</style>
+	
+	<script id="imageVertexShader" type="text/glsl">
+		attribute vec4 position;
+		attribute vec2 texCoord;
+		
+		varying vec2 texCoordI;
+
+		void main(void) {
+			texCoordI = vec2(texCoord.x, 1.0 - texCoord.y);
+			gl_Position = position;
+		}
+	</script>
+	<script id="imageFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+		precision highp float;
+		#endif
+
+		uniform sampler2D image;
+		
+		varying vec2 texCoordI;
+
+		void main(void) {
+			gl_FragColor = texture2D(image, texCoordI);
+		}
+	</script>
+	
+	<script id="vertexShader" type="text/glsl">
+		attribute vec3 position;
+		attribute vec3 normal;
+		attribute vec2 texCoord;
+		
+		uniform mat4 model;
+		uniform mat4 projection;
+		uniform mat4 view;
+		uniform vec3 eyePosition;
+		uniform vec3 lightPosition[$lightCount];
+		uniform bool lightEnabled[$lightCount];
+		
+		varying vec3 normalI;
+		varying vec2 texCoordI;
+		varying vec3 eyeDirection;
+		varying vec3 lightDirection[$lightCount];
+
+		void main(void) {
+			vec4 positionT = model * vec4(position, 1.0);
+			normalI = normalize((model * vec4(normal, 0.0)).xyz);
+			eyeDirection = normalize(positionT.xyz - eyePosition);
+			texCoordI = texCoord;
+			
+			for (int i = 0; i < $lightCount; i++) {
+				lightDirection[i] = lightEnabled[i]
+					? normalize(lightPosition[i] - positionT.xyz)
+					: vec3(0);
+			}
+			
+			gl_Position = projection * view * positionT;
+		}
+	</script>
+	
+	<script id="phongFragmentShader" type="text/glsl">
+		precision mediump float;
+
+		uniform vec4 color;
+		uniform vec3 lightColor[$lightCount];
+
+		varying vec3 normalI;
+		varying vec3 eyeDirection;
+		varying vec3 lightDirection[$lightCount];
+
+		vec3 lambert(vec3 normal, vec3 lightDir, vec3 lightColor, vec3 surfaceColor) {
+			return .1 * lightColor * surfaceColor +
+				.6 * lightColor * max(.0, dot(normal, lightDir)) * surfaceColor; 
+		}
+
+		vec4 phongReflection(vec3 normal, vec3 lightDir, vec3 eyeDirection, vec3 specularClr) {
+			return .3 * vec4(specularClr * pow(max(0.0, dot(reflect(eyeDirection, normal), lightDir)), 10.0), 1.0);
+		}
+
+		void main(void) {
+			vec3 nNormal = normalize(normalI);
+			vec3 nEyeDir = normalize(eyeDirection);
+			vec3 lambertSum = vec3(0);
+			vec4 reflectionSum = vec4(0);
+			
+			for (int i = 0; i < $lightCount; i++) {
+				vec3 lightDir = lightDirection[i];
+
+				lambertSum += lambert(nNormal, lightDir, lightColor[i], color.rgb);
+				reflectionSum += phongReflection(nNormal, lightDir, nEyeDir, lightColor[i]);
+			}
+
+			gl_FragColor = vec4(lambertSum, color.a) + reflectionSum;
+		}
+	</script>
+	
+	<script id="phongToonFragmentShader" type="text/glsl">
+		precision mediump float;
+
+		uniform vec4 color;
+		uniform vec3 lightColor[$lightCount];
+
+		varying vec3 normalI;
+		varying vec3 eyeDirection;
+		varying vec3 lightDirection[$lightCount];
+
+		vec3 lambertToon(vec3 normal, vec3 lightDir, vec3 lightColor, vec3 surfaceColor, float steps) {
+			return 0.2 * lightColor * surfaceColor +
+				0.8 * lightColor * surfaceColor * (ceil(max(0.0, dot(normal, lightDir)) * steps) / steps); 
+		}
+
+		vec4 phongToonReflection(vec3 normal, vec3 lightDir, vec3 eyeDirection, vec3 specularClr, float size) {
+			float reflectionFactor = pow(max(0.0, dot(reflect(eyeDirection, normal), lightDir)), 10.0);
+			return reflectionFactor > size ? vec4(specularClr, 1.0) : vec4(0.0, 0.0, 0.0, 0.0);
+		}
+
+		void main(void) {
+			vec3 nNormal = normalize(normalI);
+			vec3 nEyeDir = normalize(eyeDirection);
+			vec3 lambertSum = vec3(0);
+			vec4 reflectionSum = vec4(0);
+			
+			for (int i = 0; i < $lightCount; i++) {
+				vec3 lightDir = lightDirection[i];
+
+				lambertSum += lambertToon(nNormal, lightDirection[i], lightColor[i], color.rgb, 3.0);
+				reflectionSum += phongToonReflection(nNormal, lightDirection[i], nEyeDir, lightColor[i], 0.5);
+			}
+			
+			gl_FragColor = vec4(lambertSum, color.a) + reflectionSum;
+		}
+	</script>
+	
+	<script id="textureFragmentShader" type="text/glsl">
+		precision highp float;
+		
+		uniform sampler2D earth;
+		uniform vec3 lightColor[$lightCount];
+
+		varying vec3 normalI;
+		varying vec3 eyeDirection;
+		varying vec3 lightDirection[$lightCount];
+		varying vec2 texCoordI;
+
+		vec3 lambert(vec3 normal, vec3 lightDir, vec3 lightColor, vec3 surfaceColor) {
+			return 0.1 * lightColor * surfaceColor +
+				0.6 * lightColor * max(0.0, dot(normal, lightDir)) * surfaceColor; 
+		}
+
+		vec3 phongReflection(vec3 normal, vec3 lightDir, vec3 eyeDirection, vec3 specularClr) {
+			return 0.3 * specularClr * pow(max(0.0, dot(reflect(eyeDirection, normal), lightDir)), 10.0);
+		}
+
+		void main(void) {
+			vec3 color = texture2D(earth, texCoordI).rgb;
+			vec3 nNormal = normalize(normalI);
+			vec3 nEyeDir = normalize(eyeDirection);
+			vec3 lambertSum = vec3(0);
+			vec3 reflectionSum = vec3(0);
+			
+			for (int i = 0; i < $lightCount; i++) {
+				vec3 lightDir = lightDirection[i];
+
+				lambertSum += lambert(nNormal, lightDir, lightColor[i], color.rgb);
+				reflectionSum += phongReflection(nNormal, lightDir, nEyeDir, lightColor[i]);
+			}
+
+			gl_FragColor = vec4(lambertSum + reflectionSum, 1.0);
+		}
+	</script>
+	
+	<script id="skyboxVertexShader" type="text/glsl">
+		attribute vec4 position;
+		varying vec4 v_position;
+		
+		void main() {
+			v_position = position;
+			gl_Position = position;
+		}
+	</script>
+	<script id="skyboxFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform samplerCube skybox;
+		uniform mat4 viewDirectionProjectionInverse;
+		uniform bool drawDepth;
+		uniform float maxDepth;
+		varying vec4 v_position;
+		
+		void main() {
+			if (drawDepth) {
+				gl_FragColor = vec4(maxDepth);
+			} else {
+				vec4 t = viewDirectionProjectionInverse * v_position;
+				gl_FragColor = textureCube(skybox, normalize(t.xyz / t.a));
+			}
+		}
+	</script>
+	
+	
+	
+	
+	<!-- POST PROCESSING SHADERS ... -->
+	
+	
+	
+	
+	<script id="depthVertexShader" type="text/glsl">
+		attribute vec4 position;
+		
+		uniform mat4 projection;
+		uniform mat4 view;
+		uniform mat4 model;
+
+		varying vec4 positionI;
+
+		void main () {
+			positionI = projection * view * model * position;
+			gl_Position = positionI;
+		}
+	</script>
+	
+	<script id="depthFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform float maxDepth;
+
+		varying vec4 positionI;
+
+		void main () {
+			gl_FragColor.a = 1.0 - positionI.z / maxDepth;
+		}
+	</script>
+	
+	<script id="depthBlurFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform sampler2D texDepth;
+		uniform vec2 texelSize;
+		
+		varying vec2 texCoordI;
+
+		void main () {
+			float depth = 0.0;
+			depth += texture2D(texDepth, vec2(texCoordI.x - 2.0 * texelSize.x, texCoordI.y - 2.0 * texelSize.y)).a;
+			depth += texture2D(texDepth, vec2(texCoordI.x - 1.0 * texelSize.x, texCoordI.y - 1.0 * texelSize.y)).a;
+			depth += texture2D(texDepth, texCoordI).a;
+			depth += texture2D(texDepth, vec2(texCoordI.x + 1.0 * texelSize.x, texCoordI.y + 1.0 * texelSize.y)).a;
+			depth += texture2D(texDepth, vec2(texCoordI.x + 2.0 * texelSize.x, texCoordI.y + 2.0 * texelSize.y)).a;
+			depth /= 5.0;
+			
+			gl_FragColor.a = depth;
+		}
+	</script>
+	
+	<script id="cocFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform sampler2D texColor;
+		uniform sampler2D texDepth;
+		uniform float focusDistance;
+		uniform float focusSize;
+		uniform float near;
+		uniform float far;
+		
+		varying vec2 texCoordI;
+
+		float coc(float depth) {
+			float halfFocusSize = focusSize / 2.0;
+			float nearSpace = max(focusDistance - halfFocusSize - near, 0.0);
+			float farSpace = max(far - focusDistance - halfFocusSize, 0.0);
+			float distance = 1.0 - focusDistance - depth;
+			return distance < 0.0
+					? smoothstep(0.0, nearSpace, abs(distance))
+					: smoothstep(0.0, farSpace, abs(distance));
+		}
+
+		void main () {
+			vec3 color = texture2D(texColor, texCoordI).rgb;
+			float depth = texture2D(texDepth, texCoordI).a;
+			
+			gl_FragColor = vec4(color, coc(depth));
+		}
+	</script>
+	
+	<script id="blurFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform sampler2D image;
+		uniform vec2 blurSize;
+		
+		varying vec2 texCoordI;
+		
+		void main() {
+   			vec4 sum = vec4(0.0);
+			
+			sum += texture2D(image, vec2(texCoordI.x - 4.0 * blurSize.x, texCoordI.y - 4.0 * blurSize.y)) * 0.05;
+			sum += texture2D(image, vec2(texCoordI.x - 3.0 * blurSize.x, texCoordI.y - 3.0 * blurSize.y)) * 0.09;
+			sum += texture2D(image, vec2(texCoordI.x - 2.0 * blurSize.x, texCoordI.y - 2.0 * blurSize.y)) * 0.12;
+			sum += texture2D(image, vec2(texCoordI.x - 1.0 * blurSize.x, texCoordI.y - 1.0 * blurSize.y)) * 0.15;
+			sum += texture2D(image, vec2(texCoordI.x                   , texCoordI.y                   )) * 0.16;
+			sum += texture2D(image, vec2(texCoordI.x + 1.0 * blurSize.x, texCoordI.y + 1.0 * blurSize.y)) * 0.15;
+			sum += texture2D(image, vec2(texCoordI.x + 2.0 * blurSize.x, texCoordI.y + 2.0 * blurSize.y)) * 0.12;
+			sum += texture2D(image, vec2(texCoordI.x + 3.0 * blurSize.x, texCoordI.y + 3.0 * blurSize.y)) * 0.09;
+			sum += texture2D(image, vec2(texCoordI.x + 4.0 * blurSize.x, texCoordI.y + 4.0 * blurSize.y)) * 0.05;
+			
+			gl_FragColor = sum;
+		}
+	</script>
+	
+	<script id="cocBlurFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform sampler2D image;
+		uniform vec2 texelSize; // implicitly sets orientation in 2 passes
+		uniform float focusDistance;
+		uniform float focusSize;
+		
+		varying vec2 texCoordI;
+		
+		void main() {
+			const float BLUR_SIZE = 10.0; // limits hardware requirements
+			
+			vec3 colorSum = vec3(0.0);
+			float texelCount = 0.0;
+			float halfBlur = BLUR_SIZE * 0.5;
+			
+			for (float i = 0.0; i < BLUR_SIZE; i++) {
+				float offset = i - halfBlur;
+				vec2 texelOffset = texCoordI + texelSize * offset;
+				vec4 neighborTexel = texture2D(image, texelOffset);
+				vec3 color = neighborTexel.rgb;
+				float coc = neighborTexel.a;
+				
+				colorSum += color * coc; // do not add focussed texel
+				texelCount += coc;
+			}
+			
+			gl_FragColor = texelCount > 0.0
+					? vec4(colorSum / texelCount, texture2D(image, texCoordI).a)
+					: texture2D(image, texCoordI);
+		}
+	</script>
+	
+	<script id="dofFragmentShader" type="text/glsl">
+		#ifdef GL_ES
+			precision highp float;
+		#endif
+		
+		uniform sampler2D texBlur;
+		uniform sampler2D texDOFMask;
+		uniform float focusDistance;
+		
+		varying vec2 texCoordI;
+		
+		void main() {
+   			//vec4 color = texture2D(texColor, texCoordI);
+			vec3 blur = texture2D(texBlur, texCoordI).rgb;
+			vec4 color = texture2D(texDOFMask, texCoordI);
+			
+			gl_FragColor = vec4(mix(color.rgb, blur, color.a), 1.0);
+		}
+	</script>
+</head>
+
+<body>
+	<div id="header">
+		<h2>Depth of Field (DOF)</h2>
+	</div>
+
+	<div id="info"></div>
+	
+	<canvas id="canvas"></canvas>
+	
+	<div id="controls">
+		<div class="control">
+			<h4>POST PROCESSORS</h4>
+			<div id="cameraSelector"></div>
+		</div>
+		<div class="control">
+			<h4>Camera Focus</h4>
+			<input id="focusDistance" type="range"  min="0" max="100" />
+		</div>
+	</div>
+	
+	<div id="about">
+		Igor Marijanovic s... Mail: igor [&auml;tt] marijanovic [dat] de<br />
+		Max Goltzsche s794761 Mail: max.goltzsche [&auml;tt] gmail [dat] com
+	</div>
+</body>
+
+</html>
